@@ -7,19 +7,21 @@ import requests
 HOST = "https://api.openprocurement.org"
 TENDERS_ENDPOINT = f"{HOST}/api/2.5/tenders"
 CPV_PATTERN = r"^336\d{2}000-\d{1}$" #CPV pharmaceuticals products (starts with 336)
-STORE_PATH = "raw_tenders.json"
+STORE_PATH = "raw_tenders.jsonl"
 
 
-def save_tenders_list_to_json(tenders: list, file_path: str = STORE_PATH) -> None:
-    """Store list of all tenders to empty JSON
 
+def save_tenders_to_jsonl(tenders: list, file_path: str = STORE_PATH) -> None:
+    """Store list of all tenders to JSON Lines format.
+ 
     Args:
         tenders (list): List of tender objects retrieved from the API.
-        file_path (str): Target file path for saving the data.
+        filepath (str): Target file path in JSON Lines format.
     """
 
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(tenders, ensure_ascii=False))
+        for item in tenders:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
     print(f"{len(tenders)} tenders written to {file_path}")
 
 
@@ -110,6 +112,8 @@ def crawl_prozorro_tenders(max_pages: int = 10,
                         if matched_cpv:
                             print(f"-> Found matching tender: ID {tender_id} (CPV: {matched_cpv})")
                             medical_tenders.append(tender_details)
+                        else:
+                            print(f"-> Tender ID {tender_id} does not contain matching CPV codes.")
 
                 # Extract URL for the next page in pagination
                 next_page_url = feed.get("next_page", {}).get("uri")
@@ -130,7 +134,7 @@ if __name__ == "__main__":
     extracted_tenders = crawl_prozorro_tenders(max_pages=10, page_size=20)
     
     if extracted_tenders:
-        save_tenders_list_to_json(extracted_tenders, STORE_PATH)
+        save_tenders_to_jsonl(extracted_tenders, STORE_PATH)
     else:
         print("No medical tenders matching criteria were found.")
 
