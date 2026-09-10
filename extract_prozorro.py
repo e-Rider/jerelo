@@ -1,70 +1,136 @@
 import json
 import re
 import time
-import requests as rq
+import requests
 
-# Константи конфігурації
+# Configuration constants
 HOST = "https://api.openprocurement.org"
-ENDPOINT = f"{HOST}/api/0/tenders"
-CPV_PATTERN = r"^336\d{2}000-\d{1}$"  # CPV-коди медичних препаратів
-STORE_PATH = "raw_tenders.jsonl" #JSON Lines
+TENDERS_ENDPOINT = f"{HOST}/api/2.5/tenders"
+CPV_PATTERN = r"^336\d{2}000-\d{1}$" #CPV pharmaceuticals products (starts with 336)
+STORE_PATH = "raw_tenders.json"
 
-def save_tender_data(tnd_data):
-    with open(STORE_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(tnd_data, ensure_ascii=False) + "\n")
 
-def get_tender(tnd_id):
-    resp = rq.get(f"{ENDPOINT}/{tnd_id}")
-    if resp.status_code != 200:
-        print(f"Error: {resp.status_code}")
-        return False
-    return resp
+def save_tenders_list_to_json(tenders: list, file_path: str = STORE_PATH) -> None:
+    """Store list of all tenders to empty JSON
 
-def check_cpv(tnd_data, cpv):
-    for i in tnd_data["data"]["items"]:
-        # print(f"Checking item: {i['description']}, CPV: {i['classification']['id']}")
-        if re.match(cpv, i["classification"]["id"]):
-            return True
-    return False
+    Args:
+        tenders (list): List of tender objects retrieved from the API.
+        file_path (str): Target file path for saving the data.
+    """
 
-# todo: create function to process page of tenders
-def walk_last_tenders():
-    limit = 10
-    pages = 5
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(tenders, ensure_ascii=False))
+    print(f"{len(tenders)} tenders written to {file_path}")
+
+
+def fetch_tender_details(session: requests.Session, tender_id: str) -> dict | None:
+    """Fetch full details for a single tender by its unique ID.
+
+    Args:
+        session (requests.Session): Active HTTP session for connection pooling.
+        tender_id (str): Unique Prozorro tender ID.
+
+    Returns:
+        dict | None: Tender data payload if request succeeds, None otherwise.
+    """
+    url = f"{TENDERS_ENDPOINT}/{tender_id}"
+    try:
+        response = session.get(url, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        print(f"Failed to fetch tender '{tender_id}': HTTP {response.status_code}")
+    except requests.RequestException as error:
+        print(f"Network error while fetching tender '{tender_id}': {error}")
+    return None
+
+
+def extract_matching_cpv(tender_data: dict, cpv_pattern: str) -> str:
+    """Search for the first item CPV code matching the regular expression pattern.
+
+    Args:
+        tender_data (dict): Complete tender payload.
+        cpv_pattern (str): Regular expression pattern for the CPV code.
+
+    Returns:
+        str: Matched CPV code string if found, otherwise an empty string.
+    """
+    tender_items = tender_data.get("data", {}).get("items", [])
+    for item in tender_items:
+        item_cpv = item.get("classification", {}).get("id", "")
+        if re.match(cpv_pattern, item_cpv):
+            return item_cpv
+    return ""
+
+
+def crawl_prozorro_tenders(max_pages: int = 10, 
+                            page_size: int = 100, 
+                            cpv_pattern: str = CPV_PATTERN
+                            ) -> list[dict]:
+    """Paginate through Prozorro tenders feed and filter tenders matching 
+        medical CPV codes.
+
+    Args:
+        max_pages (int): Maximum number of pagination pages to process.
+        page_size (int): Number of tenders per page requested from API.
+        cpv_pattern (str): Regex pattern to filter medical items.
+
+    Returns:
+        list[dict]: List of filtered tender payloads containing matching CPV codes.
+    """
     current_page = 1
-    next_page_uri = f"{ENDPOINT}?descending=1&limit={limit}"
+    next_page_url = f"{TENDERS_ENDPOINT}?descending=1&limit={page_size}"
+    medical_tenders = []
 
-    while current_page <= pages:
-        resp = rq.get(next_page_uri)
-        if resp.status_code != 200:
-            print(f"Error: {resp.status_code}")
-        else:
-            # print(f"HTTP status: {resp.status_code}")
-            feed = resp.json()
-            data = feed["data"]
-            if len(data) == 0:
-                print("No more tenders found.")
+    # Use HTTP Session for re-using TCP connections across requests
+    with requests.Session() as session:
+        while current_page <= max_pages and next_page_url:
+            print(f"Processing page {current_page}/{max_pages}: {next_page_url}")
+            try:
+                response = session.get(next_page_url, timeout=10)
+                if response.status_code != 200:
+                    print(f"Failed to retrieve page {current_page}: HTTP {response.status_code}")
+                    break
+
+                feed = response.json()
+                tenders_list = feed.get("data", [])
+                if not tenders_list:
+                    print("No more tenders found in feed.")
+                    break
+
+                for tender in tenders_list:
+                    tender_id = tender.get("id")
+                    if not tender_id:
+                        continue
+
+                    time.sleep(0.05) # delay to prevent HTTP 429 (Too Many Requests)
+                    tender_details = fetch_tender_details(session, tender_id)
+
+                    if tender_details:
+                        matched_cpv = extract_matching_cpv(tender_details, cpv_pattern)
+                        if matched_cpv:
+                            print(f"-> Found matching tender: ID {tender_id} (CPV: {matched_cpv})")
+                            medical_tenders.append(tender_details)
+
+                # Extract URL for the next page in pagination
+                next_page_url = feed.get("next_page", {}).get("uri")
+                current_page += 1
+                time.sleep(0.5)
+
+            except requests.RequestException as error:
+                print(f"Network error on page {current_page}: {error}")
                 break
-            for i in data:
-                tnd_id = i["id"]
-                time.sleep(0.01)
-                tnd_data = get_tender(tnd_id)
-                if tnd_data:
-                    if check_cpv(tnd_data.json(), CPV_PATTERN):
-                        print(f"Tender ID: {tnd_id}")
-                        save_tender_data(tnd_data.json())
-                        # todo: save tender data to file
-                    else:
-                        # print(f"Tender ID: {tnd_id} does not match CPV {cpv}")
-                        pass
 
-            next_page_uri = feed["next_page"]["uri"]
-            current_page += 1
-            time.sleep(0.5)  # delay to avoid hitting the API too quickly
+    return medical_tenders
+
 
 if __name__ == "__main__":
-    with open(STORE_PATH, "w") as f:
-        f.write("")
-    walk_last_tenders()
-
+    print("Starting Prozorro medical tenders extractor...")
+    
+    # Execute ETL Extract step
+    extracted_tenders = crawl_prozorro_tenders(max_pages=10, page_size=20)
+    
+    if extracted_tenders:
+        save_tenders_list_to_json(extracted_tenders, STORE_PATH)
+    else:
+        print("No medical tenders matching criteria were found.")
 
