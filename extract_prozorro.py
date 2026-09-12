@@ -6,23 +6,20 @@ import requests
 # Configuration constants
 HOST = "https://api.openprocurement.org"
 TENDERS_ENDPOINT = f"{HOST}/api/2.5/tenders"
-CPV_PATTERN = r"^336\d{2}000-\d{1}$" #CPV pharmaceuticals products (starts with 336)
+CPV_PATTERN = re.compile(r"^336\d{2}000-\d$") #CPV pharmaceuticals products (starts with 336)
 STORE_PATH = "raw_tenders.jsonl"
 
 
+def append_tender_to_jsonl(tender: dict, file_path: str = STORE_PATH) -> None:
+    """Appends a single tender object to a JSON Lines file.
 
-def save_tenders_to_jsonl(tenders: list, file_path: str = STORE_PATH) -> None:
-    """Store list of all tenders to JSON Lines format.
- 
     Args:
-        tenders (list): List of tender objects retrieved from the API.
-        filepath (str): Target file path in JSON Lines format.
+        tender (dict): Tender payload object.
+        file_path (str): Target file path in JSON Lines format.
     """
 
-    with open(file_path, "w", encoding="utf-8") as f:
-        for item in tenders:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
-    print(f"{len(tenders)} tenders written to {file_path}")
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(tender, ensure_ascii=False) + "\n")
 
 
 def fetch_tender_details(session: requests.Session, tender_id: str) -> dict | None:
@@ -46,12 +43,12 @@ def fetch_tender_details(session: requests.Session, tender_id: str) -> dict | No
     return None
 
 
-def extract_matching_cpv(tender_data: dict, cpv_pattern: str) -> str:
+def extract_matching_cpv(tender_data: dict, cpv_pattern: re.Pattern) -> str:
     """Search for the first item CPV code matching the regular expression pattern.
 
     Args:
         tender_data (dict): Complete tender payload.
-        cpv_pattern (str): Regular expression pattern for the CPV code.
+        cpv_pattern (re.Pattern): Regular expression pattern for the CPV code.
 
     Returns:
         str: Matched CPV code string if found, otherwise an empty string.
@@ -59,29 +56,29 @@ def extract_matching_cpv(tender_data: dict, cpv_pattern: str) -> str:
     tender_items = tender_data.get("data", {}).get("items", [])
     for item in tender_items:
         item_cpv = item.get("classification", {}).get("id", "")
-        if re.match(cpv_pattern, item_cpv):
+        if cpv_pattern.match(item_cpv):
             return item_cpv
     return ""
 
 
 def crawl_prozorro_tenders(max_pages: int = 10, 
                             page_size: int = 100, 
-                            cpv_pattern: str = CPV_PATTERN
-                            ) -> list[dict]:
+                            cpv_pattern: re.Pattern = CPV_PATTERN
+                            ) -> int:
     """Paginate through Prozorro tenders feed and filter tenders matching 
         medical CPV codes.
 
     Args:
         max_pages (int): Maximum number of pagination pages to process.
         page_size (int): Number of tenders per page requested from API.
-        cpv_pattern (str): Regex pattern to filter medical items.
+        cpv_pattern (re.Pattern): Regex pattern to filter medical items.
 
     Returns:
-        list[dict]: List of filtered tender payloads containing matching CPV codes.
+        int: Count of filtered tender payloads containing matching CPV codes.
     """
     current_page = 1
     next_page_url = f"{TENDERS_ENDPOINT}?descending=1&limit={page_size}"
-    medical_tenders = []
+    medical_tenders = 0
 
     # Use HTTP Session for re-using TCP connections across requests
     with requests.Session() as session:
@@ -111,7 +108,8 @@ def crawl_prozorro_tenders(max_pages: int = 10,
                         matched_cpv = extract_matching_cpv(tender_details, cpv_pattern)
                         if matched_cpv:
                             print(f"-> Found matching tender: ID {tender_id} (CPV: {matched_cpv})")
-                            medical_tenders.append(tender_details)
+                            append_tender_to_jsonl(tender_details, STORE_PATH)
+                            medical_tenders += 1
                         else:
                             print(f"-> Tender ID {tender_id} does not contain matching CPV codes.")
 
@@ -131,10 +129,6 @@ if __name__ == "__main__":
     print("Starting Prozorro medical tenders extractor...")
     
     # Execute ETL Extract step
-    extracted_tenders = crawl_prozorro_tenders(max_pages=10, page_size=20)
-    
-    if extracted_tenders:
-        save_tenders_to_jsonl(extracted_tenders, STORE_PATH)
-    else:
-        print("No medical tenders matching criteria were found.")
+    extracted_tenders = crawl_prozorro_tenders(max_pages=10, page_size=40)
+    print(f"Total medical tenders found: {extracted_tenders}")
 
