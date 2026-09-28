@@ -16,3 +16,8 @@ ENV/
 .directory
 *~
 *.swp
+
+# Draft files
+draft/
+data/
+temp/

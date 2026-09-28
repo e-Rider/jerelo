@@ -1,5 +1,4 @@
 """
-extract_prozorro_gemini.py
 Prozorro Data Extractor to AWS S3 (Extract Layer)
 """
 
