@@ -1,17 +1,17 @@
-# Віртуальне оточення (найважливіше!)
+# Virtual environment (important!)
 .venv/
 venv/
 ENV/
 
-# Кеш Python (автоматично згенеровані файли)
+# Python cache (automatically generated files)
 **/__pycache__/
 *.py[cod]
 *$py.class
 
-# Файли конфігурації VS Code (за бажанням, якщо налаштування суто твої локальні)
+# VS Code configuration files (optional, if your settings are strictly local)
 .vscode/
 
-# Системні файли Linux Mint / Ubuntu
+# Linux Mint / Ubuntu system files
 .DS_Store
 .directory
 *~
