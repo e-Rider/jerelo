@@ -1,3 +1,8 @@
+"""
+extract_prozorro_gemini.py
+Prozorro Data Extractor to AWS S3 (Extract Layer)
+"""
+
 import asyncio
 import json
 import logging
@@ -22,7 +27,6 @@ logging.basicConfig(
 HOST = "https://api.openprocurement.org"
 TENDERS_ENDPOINT = f"{HOST}/api/2.5/tenders" 
 STATE_KEY = "state/prozorro_offset.json"
-#todo: add params to uri - &opt_fields=public_modified
 
 # Specification: regex for pharmaceutical products
 MEDICAL_CPV_PATTERN = re.compile(r"^336\d{5}-\d$")
@@ -32,6 +36,33 @@ MAX_CONCURRENT_REQUESTS = 30
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_RETRIES = 5
 FLUSH_EVERY_PAGES = 10
+
+
+def build_feed_url(
+    offset: str | None = None,
+    limit: int = 100,
+    mode: str | None = None,
+    opt_fields: list[str] | None = None,
+    descending: str | int | None = None,
+) -> str:
+    """Generates the initial URL for querying the Prozorro feed with optional parameters."""
+    params: dict[str, Any] = {"limit": limit}
+    
+    if offset:
+        params["offset"] = offset
+        
+    if mode:
+        params["mode"] = mode
+        
+    if opt_fields:
+        params["opt_fields"] = (
+            ",".join(opt_fields) if isinstance(opt_fields, list) else opt_fields
+        )
+        
+    if descending:
+        params["descending"] = descending
+        
+    return f"{TENDERS_ENDPOINT}?{urlencode(params)}"
 
 
 def utc_now_iso() -> str:
@@ -303,6 +334,9 @@ class ProzorroPipelineRunner:
         cpv_pattern: re.Pattern[str] = MEDICAL_CPV_PATTERN,
         s3_client: Any | None = None,
         temp_dir: str = "/tmp",
+        mode: str | None = None,
+        opt_fields: list[str] | None = None,
+        descending: str | int | None = None,
     ) -> None:
         self.bucket_name = bucket_name
         self.page_size = page_size
@@ -311,6 +345,9 @@ class ProzorroPipelineRunner:
         self.s3_client = s3_client or boto3.client("s3")
         self.state_manager = S3StateManager(bucket_name, self.s3_client)
         self.temp_dir = temp_dir
+        self.mode = mode
+        self.opt_fields = opt_fields
+        self.descending = descending
 
     async def _upload_file(self, path: str, key: str) -> None:
         """Asynchronous upload of a local file to S3 via to_thread."""
@@ -324,9 +361,12 @@ class ProzorroPipelineRunner:
         state = await asyncio.to_thread(self.state_manager.load_state)
         last_offset = state.get("last_offset")
         
-        page_uri = (
-            f"{TENDERS_ENDPOINT}?{urlencode({'limit': self.page_size, 'offset': last_offset})}"
-            if last_offset else f"{TENDERS_ENDPOINT}?limit={self.page_size}"
+        page_uri = build_feed_url(
+            offset=last_offset,
+            limit=self.page_size,
+            mode=self.mode,
+            opt_fields=self.opt_fields,
+            descending=self.descending,
         )
         
         total_items = int(state.get("total_items_processed", 0))
@@ -452,14 +492,23 @@ class ProzorroPipelineRunner:
 
 async def main() -> None:
     """Entry point for the S3 ETL pipeline configured via environment variables."""
-    bucket_name = os.getenv("AWS_S3_BUCKET", "prozorro-data-lake-233810108139-eu-central-1-an")
+    bucket_name = os.getenv("AWS_S3_BUCKET", "prozorro-data-lake")
     page_size = int(os.getenv("PROZORRO_PAGE_SIZE", "100"))
     flush_every_pages = int(os.getenv("PROZORRO_FLUSH_EVERY_PAGES", str(FLUSH_EVERY_PAGES)))
+    
+   # Fetching optional parameters from the environment
+    mode = os.getenv("PROZORRO_MODE")
+    opt_fields_raw = os.getenv("PROZORRO_OPT_FIELDS")
+    opt_fields = opt_fields_raw.split(",") if opt_fields_raw else None
+    descending = os.getenv("PROZORRO_DESCENDING")
     
     runner = ProzorroPipelineRunner(
         bucket_name=bucket_name,
         page_size=page_size,
         flush_every_pages=flush_every_pages,
+        mode=mode,
+        opt_fields=opt_fields,
+        descending=descending,
     )
     await runner.run()
 
