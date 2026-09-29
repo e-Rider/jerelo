@@ -53,10 +53,16 @@ def build_feed_url(
     if mode:
         params["mode"] = mode
         
+    # Always include public_modified, append extra fields if provided without duplicates
+    fields = ["public_modified"]
     if opt_fields:
-        params["opt_fields"] = (
-            ",".join(opt_fields) if isinstance(opt_fields, list) else opt_fields
-        )
+        extra_fields = opt_fields if isinstance(opt_fields, list) else opt_fields.split(",")
+        for field in extra_fields:
+            field_clean = field.strip()
+            if field_clean and field_clean not in fields:
+                fields.append(field_clean)
+                
+    params["opt_fields"] = ",".join(fields)
         
     if descending:
         params["descending"] = descending
@@ -336,6 +342,8 @@ class ProzorroPipelineRunner:
         mode: str | None = None,
         opt_fields: list[str] | None = None,
         descending: str | int | None = None,
+        start_offset: str | None = None,
+        max_pages: int | None = None,
     ) -> None:
         self.bucket_name = bucket_name
         self.page_size = page_size
@@ -347,6 +355,8 @@ class ProzorroPipelineRunner:
         self.mode = mode
         self.opt_fields = opt_fields
         self.descending = descending
+        self.start_offset = start_offset
+        self.max_pages = max_pages
 
     async def _upload_file(self, path: str, key: str) -> None:
         """Asynchronous upload of a local file to S3 via to_thread."""
@@ -356,9 +366,11 @@ class ProzorroPipelineRunner:
         )
 
     async def run(self) -> dict[str, int]:
-        """Main execution loop: parsing feed pages until data becomes an empty array."""
+        """Main execution loop: parsing feed pages until data becomes an empty array or page limit is reached."""
         state = await asyncio.to_thread(self.state_manager.load_state)
-        last_offset = state.get("last_offset")
+        
+        # Override S3 state offset if start_offset is explicitly provided for testing
+        last_offset = self.start_offset or state.get("last_offset")
         
         page_uri = build_feed_url(
             offset=last_offset,
@@ -373,6 +385,7 @@ class ProzorroPipelineRunner:
         run_items = 0
         run_medical = 0
         pages_since_flush = 0
+        processed_pages = 0
         buffered_items = 0
         buffered_medical = 0
         fallback_timestamp = 0.0
@@ -399,7 +412,7 @@ class ProzorroPipelineRunner:
             partition_date = datetime.now(timezone.utc)
             # Hive partitioning: year=YYYY/month=MM/day=DD
             partition = (
-                f"year={partition_date:%Y}/month={partition_date:%m:02d}/day={partition_date:%d:02d}"
+                f"year={partition_date:%Y}/month={partition_date:%m}/day={partition_date:%d}"
             )
             file_timestamp = _filename_timestamp(offset_for_name, fallback_timestamp)
             
@@ -430,7 +443,7 @@ class ProzorroPipelineRunner:
                 timeout=timeout, connector=connector
             ) as session:
                 while True:
-                    logging.info("Processing feed page: %s", page_uri)
+                    logging.info("Processing feed page %s: %s", processed_pages + 1, page_uri)
                     page = await process_feed_page(
                         session, page_uri, semaphore, self.cpv_pattern
                     )
@@ -459,6 +472,7 @@ class ProzorroPipelineRunner:
                     buffered_items += page_item_count
                     buffered_medical += page_medical_count
                     pages_since_flush += 1
+                    processed_pages += 1
                     fallback_timestamp = page.max_public_modified or fallback_timestamp
 
                     if page.next_offset:
@@ -467,6 +481,11 @@ class ProzorroPipelineRunner:
                     if pages_since_flush >= self.flush_every_pages:
                         await flush_batch(page.next_offset or last_offset)
                         pages_since_flush = 0
+
+                    # Check max_pages limit for testing
+                    if self.max_pages and processed_pages >= self.max_pages:
+                        logging.info("Reached maximum pages limit for testing (%s pages). Stopping.", self.max_pages)
+                        break
                         
                     if not page.next_page_uri:
                         logging.info("Feed page has no next_page_uri link; stopping traversal.")
@@ -475,8 +494,8 @@ class ProzorroPipelineRunner:
 
             await flush_batch(last_offset)
             logging.info(
-                "Extraction completed: %s feed records, %s medical tenders",
-                run_items, run_medical,
+                "Extraction completed: %s feed records, %s medical tenders across %s pages",
+                run_items, run_medical, processed_pages
             )
             return {"items_processed": run_items, "medical_items_found": run_medical}
             
@@ -495,11 +514,16 @@ async def main() -> None:
     page_size = int(os.getenv("PROZORRO_PAGE_SIZE", "100"))
     flush_every_pages = int(os.getenv("PROZORRO_FLUSH_EVERY_PAGES", str(FLUSH_EVERY_PAGES)))
     
-   # Fetching optional parameters from the environment
+    # Retrieving optional environment parameters
     mode = os.getenv("PROZORRO_MODE")
     opt_fields_raw = os.getenv("PROZORRO_OPT_FIELDS")
     opt_fields = opt_fields_raw.split(",") if opt_fields_raw else None
     descending = os.getenv("PROZORRO_DESCENDING")
+    
+    # Parameters for testing
+    start_offset = os.getenv("PROZORRO_START_OFFSET")
+    max_pages_env = os.getenv("PROZORRO_MAX_PAGES")
+    max_pages = int(max_pages_env) if max_pages_env else None
     
     runner = ProzorroPipelineRunner(
         bucket_name=bucket_name,
@@ -508,6 +532,8 @@ async def main() -> None:
         mode=mode,
         opt_fields=opt_fields,
         descending=descending,
+        start_offset=start_offset,
+        max_pages=max_pages,
     )
     await runner.run()
 
