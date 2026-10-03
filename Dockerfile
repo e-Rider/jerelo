@@ -11,7 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the main extraction script into the container
-COPY extract_prozorro.py .
+COPY src/extract_prozorro.py .
 
 # Define the command to run the application when the container starts
 CMD ["python", "extract_prozorro.py"]
